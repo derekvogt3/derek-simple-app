@@ -1,4 +1,4 @@
-```markdown
+
 # My Fullstack App
 
 This is a full-stack web application with a React and TypeScript front end, and a Python and Flask back end connected to a SQLite database.
@@ -70,4 +70,3 @@ npm run dev
 ```
 
 The front-end development server will be running on `http://localhost:5173`. You can now view the application in your browser at this address.
-```

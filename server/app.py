@@ -1,86 +1,86 @@
+from gevent import monkey
+monkey.patch_all()
+
 import os
 from flask import Flask, request, jsonify
-from flask_cors import CORS
+from flask_socketio import SocketIO
 from serpapi import GoogleSearch
 from openai import OpenAI
 from dotenv import load_dotenv
+from gevent.pywsgi import WSGIServer
+from geventwebsocket.handler import WebSocketHandler
 
-# Load environment variables from .env file
 load_dotenv()
 
-# Initialize the Flask app
 app = Flask(__name__)
-CORS(app)
+# The secret key is needed for session management with Socket.IO - doesn't matter for now
+app.config['SECRET_KEY'] = 'your-secret-key!' 
+socketio = SocketIO(app, cors_allowed_origins="*")
 
-# Initialize API clients
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 serpapi_api_key = os.getenv("SERPAPI_API_KEY")
 
-# --- API Endpoint to handle queries ---
-@app.route('/api/query', methods=['POST'])
-def handle_query():
-    # Get the user's query from the request body
+@app.route('/api/search', methods=['POST'])
+def get_search_results():
     data = request.get_json()
     query = data.get('query')
-
-    if not query:
-        return jsonify({"error": "Query is required"}), 400
-    if not serpapi_api_key or not client.api_key:
-        return jsonify({"error": "API keys are not configured correctly"}), 500
+    if not query: return jsonify({"error": "Query is required"}), 400
 
     try:
-        # --- 1. Fetch search results using SerpAPI ---
         print(f"Fetching search results for: {query}")
-        search = GoogleSearch({
-            "q": query,
-            "api_key": serpapi_api_key
-        })
+        search = GoogleSearch({"q": query, "api_key": serpapi_api_key})
         search_results = search.get_dict()
-        organic_results = search_results.get("organic_results", [])
-
-        # Extract relevant context for the AI
-        context = ""
-        for i, result in enumerate(organic_results[:5]): # Use top 5 results
-            context += f"[{i+1}] {result.get('snippet', 'No snippet available.')}\n"
         
-        print(f"Context for AI:\n{context}")
-
-        # --- 2. Generate AI response using OpenAI ---
-        print("Generating AI response...")
-        prompt = f"""
-        Based on the following search results, provide a comprehensive answer to the user's query: "{query}"
-
-        Search Results (with sources):
-        {context}
-
-        Instructions:
-        - Synthesize the information from the search results into a clear, well-written answer.
-        - Your answer MUST include citations in the format [1], [2], etc., corresponding to the search results provided.
-        - If the search results do not provide enough information, state that you couldn't find a definitive answer.
-        - Do not invent information. Base your answer strictly on the provided text.
-        """
-
-        completion = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are a helpful AI assistant that answers questions based on provided search results."},
-                {"role": "user", "content": prompt}
-            ]
-        )
-        ai_response = completion.choices[0].message.content
-        print(f"AI Response: {ai_response}")
-
-        # --- 3. Combine and return the results ---
         response_data = {
-            "aiResponse": ai_response,
-            "searchResults": organic_results
+            "searchResults": search_results.get("organic_results", []),
+            "videoResults": search_results.get("inline_videos", [])
         }
         return jsonify(response_data)
-
     except Exception as e:
-        print(f"An error occurred: {e}")
         return jsonify({"error": str(e)}), 500
 
-# Run the app on port 5001 as we established
+
+@socketio.on('stream_request')
+def handle_stream_request(data):
+    query = data.get('query')
+    if not query: return
+
+    try:
+        search = GoogleSearch({"q": query, "api_key": serpapi_api_key})
+        results = search.get_dict()
+        context = "".join([f"[{i+1}] {r.get('snippet', '')}\n" for i, r in enumerate(results.get("organic_results", [])[:5])])
+        
+        prompt = f"""
+        Based on these search results, answer the user's query: "{query}"
+        Search Results:
+        {context}
+        Instructions:
+        - Synthesize the information into a clear answer.
+        - Include citations like [1], [2], etc.
+        - Answer based only on the provided text.
+        """
+
+        stream = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}],
+            stream=True,
+        )
+
+        print(f"Streaming response for client: {request.sid}")
+        for chunk in stream:
+            content = chunk.choices[0].delta.content
+            if content:
+                socketio.emit('token', {'data': content}, to=request.sid)
+        
+        socketio.emit('stream_end', to=request.sid)
+        print(f"Stream ended for client: {request.sid}")
+
+    except Exception as e:
+        print(f"Stream error for {request.sid}: {e}")
+        socketio.emit('stream_error', {'error': str(e)}, to=request.sid)
+
+
 if __name__ == '__main__':
-    app.run(debug=True, port=5001)
+    print("Starting gevent server on http://localhost:5001")
+    http_server = WSGIServer(('0.0.0.0', 5001), app, handler_class=WebSocketHandler)
+    http_server.serve_forever()

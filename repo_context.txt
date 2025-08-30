@@ -81,90 +81,90 @@ The front-end development server will be running on `http://localhost:5173`. You
 ```python
 import os
 from flask import Flask, request, jsonify
-from flask_cors import CORS
+from flask_socketio import SocketIO, emit
+import os
+from flask import Flask, request, jsonify
+from flask_socketio import SocketIO
 from serpapi import GoogleSearch
 from openai import OpenAI
 from dotenv import load_dotenv
+from gevent.pywsgi import WSGIServer
+from geventwebsocket.handler import WebSocketHandler
 
-# Load environment variables from .env file
 load_dotenv()
 
-# Initialize the Flask app
 app = Flask(__name__)
-CORS(app)
+# The secret key is needed for session management with Socket.IO - doesn't matter for now
+app.config['SECRET_KEY'] = 'your-secret-key!' 
+# not secure but fine for now
+socketio = SocketIO(app, cors_allowed_origins="*")
 
-# Initialize API clients
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 serpapi_api_key = os.getenv("SERPAPI_API_KEY")
 
-# --- API Endpoint to handle queries ---
-@app.route('/api/query', methods=['POST'])
-def handle_query():
-    # Get the user's query from the request body
+@app.route('/api/search', methods=['POST'])
+def get_search_results():
     data = request.get_json()
     query = data.get('query')
-
-    if not query:
-        return jsonify({"error": "Query is required"}), 400
-    if not serpapi_api_key or not client.api_key:
-        return jsonify({"error": "API keys are not configured correctly"}), 500
+    if not query: return jsonify({"error": "Query is required"}), 400
 
     try:
-        # --- 1. Fetch search results using SerpAPI ---
         print(f"Fetching search results for: {query}")
-        search = GoogleSearch({
-            "q": query,
-            "api_key": serpapi_api_key
-        })
+        search = GoogleSearch({"q": query, "api_key": serpapi_api_key})
         search_results = search.get_dict()
-        organic_results = search_results.get("organic_results", [])
-
-        # Extract relevant context for the AI
-        context = ""
-        for i, result in enumerate(organic_results[:5]): # Use top 5 results
-            context += f"[{i+1}] {result.get('snippet', 'No snippet available.')}\n"
         
-        print(f"Context for AI:\n{context}")
-
-        # --- 2. Generate AI response using OpenAI ---
-        print("Generating AI response...")
-        prompt = f"""
-        Based on the following search results, provide a comprehensive answer to the user's query: "{query}"
-
-        Search Results (with sources):
-        {context}
-
-        Instructions:
-        - Synthesize the information from the search results into a clear, well-written answer.
-        - Your answer MUST include citations in the format [1], [2], etc., corresponding to the search results provided.
-        - If the search results do not provide enough information, state that you couldn't find a definitive answer.
-        - Do not invent information. Base your answer strictly on the provided text.
-        """
-
-        completion = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are a helpful AI assistant that answers questions based on provided search results."},
-                {"role": "user", "content": prompt}
-            ]
-        )
-        ai_response = completion.choices[0].message.content
-        print(f"AI Response: {ai_response}")
-
-        # --- 3. Combine and return the results ---
         response_data = {
-            "aiResponse": ai_response,
-            "searchResults": organic_results
+            "searchResults": search_results.get("organic_results", []),
+            "videoResults": search_results.get("inline_videos", [])
         }
         return jsonify(response_data)
-
     except Exception as e:
-        print(f"An error occurred: {e}")
         return jsonify({"error": str(e)}), 500
 
-# Run the app on port 5001 as we established
+
+@socketio.on('stream_request')
+def handle_stream_request(data):
+    query = data.get('query')
+    if not query: return
+
+    try:
+        search = GoogleSearch({"q": query, "api_key": serpapi_api_key})
+        results = search.get_dict()
+        context = "".join([f"[{i+1}] {r.get('snippet', '')}\n" for i, r in enumerate(results.get("organic_results", [])[:5])])
+        
+        prompt = f"""
+        Based on these search results, answer the user's query: "{query}"
+        Search Results:
+        {context}
+        Instructions:
+        - Synthesize the information into a clear answer.
+        - Include citations like [1], [2], etc.
+        - Answer based only on the provided text.
+        """
+
+        stream = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}],
+            stream=True,
+        )
+
+        print(f"Streaming response for client: {request.sid}")
+        for chunk in stream:
+            content = chunk.choices[0].delta.content
+            if content:
+                socketio.emit('token', {'data': content}, to=request.sid)
+        
+        socketio.emit('stream_end', to=request.sid)
+        print(f"Stream ended for client: {request.sid}")
+
+    except Exception as e:
+        print(f"Stream error for {request.sid}: {e}")
+        socketio.emit('stream_error', {'error': str(e)}, to=request.sid)
+
+
 if __name__ == '__main__':
-    app.run(debug=True, port=5001)
+    print("Starting gevent server on http://localhost:5001")
+    socketio.run(app, port=5001, debug=True)
 ```
 
 --- FILE: ./client/README.md ---
@@ -359,21 +359,29 @@ reportWebVitals();
 --- FILE: ./client/src/App.tsx ---
 
 ```typescript
-import React, { useState, FormEvent } from 'react';
+import { useState, FormEvent, useEffect, ReactNode} from 'react';
 import './App.css';
-import { HomeIcon, DiscoverIcon, SpacesIcon, SignInIcon, SearchIcon } from './icons';
+import { HomeIcon, DiscoverIcon, SpacesIcon, SignInIcon, SearchIcon, PlusIcon, PlayIcon } from './icons';
+import { io, Socket } from 'socket.io-client';
 
-// --- Type Definitions ---
 interface SearchResult {
   position: number;
   title: string;
   link: string;
   snippet: string;
+  source: string;
 }
 
-interface ApiResponse {
-  aiResponse: string;
+interface VideoResult {
+  title: string;
+  link: string;
+  thumbnail: string;
+  source: string;
+}
+
+interface SearchResponse {
   searchResults: SearchResult[];
+  videoResults: VideoResult[];
 }
 
 type FocusMode = 'general' | 'health' | 'local' | 'sports' | 'finance';
@@ -413,59 +421,121 @@ const focusData = {
   },
 };
 
-// --- Main App Component ---
 function App() {
   const [query, setQuery] = useState<string>('');
-  const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [searchedQuery, setSearchedQuery] = useState<string>('');
+  const [isLoadingSources, setIsLoadingSources] = useState<boolean>(false);
+  const [isStreaming, setIsStreaming] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
-  const [results, setResults] = useState<ApiResponse | null>(null);
   const [focusMode, setFocusMode] = useState<FocusMode>('general');
+  const [sources, setSources] = useState<SearchResponse | null>(null);
+  const [aiResponse, setAiResponse] = useState<string>('');
+  const [socket, setSocket] = useState<Socket | null>(null);
 
-  const handleSubmit = async (event: FormEvent) => {
-    event.preventDefault();
-    if (!query.trim()) return;
-    performSearch(query);
-  };
+  useEffect(() => {
+    // Establish WebSocket connection when the component mounts
+    const newSocket = io('http://localhost:5001');
+    setSocket(newSocket);
 
-  const handleSuggestionClick = (suggestion: string) => {
-    setQuery(suggestion);
-    performSearch(suggestion);
-  }
+    newSocket.on('connect', () => console.log('WebSocket Connected!'));
+    
+    // Listener for incoming stream tokens
+    newSocket.on('token', (data: { data: string }) => {
+      setAiResponse((prev) => prev + data.data);
+    });
 
-  const handleFocusToggle = (mode: FocusMode) => {
-    // If clicking the currently active mode, toggle back to general
-    if (focusMode === mode) {
-      setFocusMode('general');
-    } else {
-      setFocusMode(mode);
-    }
-  };
+    // Listener for the end of the stream
+    newSocket.on('stream_end', () => {
+      setIsStreaming(false);
+      console.log('Stream ended.');
+    });
+
+    // Listener for any errors during the stream
+    newSocket.on('stream_error', (data: { error: string }) => {
+      setError(`Streaming Error: ${data.error}`);
+      setIsStreaming(false);
+    });
+    
+    // Cleanup on component unmount
+    return () => {
+      newSocket.disconnect();
+    };
+  }, []);
 
   const performSearch = async (currentQuery: string) => {
-    setIsLoading(true);
+    if (!currentQuery.trim() || !socket) return;
+    
+    setIsLoadingSources(true);
     setError(null);
-    setResults(null);
+    setSources(null);
+    setAiResponse('');
+    setSearchedQuery(currentQuery);
 
     try {
-      const response = await fetch('/api/query', {
+      const searchResponse = await fetch('/api/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: currentQuery }),
       });
-      if (!response.ok) throw new Error(`Error: ${response.status} ${response.statusText}`);
-      const data: ApiResponse = await response.json();
-      setResults(data);
+      if (!searchResponse.ok) throw new Error(`Search API Error: ${searchResponse.statusText}`);
+      
+      const searchData: SearchResponse = await searchResponse.json();
+      setSources(searchData);
+      
+      setIsLoadingSources(false); 
+      setIsStreaming(true);
+      socket.emit('stream_request', { query: currentQuery });
+
     } catch (err: any) {
       setError(err.message || "An unexpected error occurred.");
-    } finally {
-      setIsLoading(false);
+      setIsLoadingSources(false);
+      setIsStreaming(false);
     }
   };
+
+  const handleSubmit = (event: FormEvent) => { event.preventDefault(); performSearch(query); };
+  const handleSuggestionClick = (suggestion: string) => { setQuery(suggestion); performSearch(suggestion); };
+  const handleFocusToggle = (mode: FocusMode) => { setFocusMode(focusMode === mode ? 'general' : mode); };
+  const handleNewSearch = () => {
+    setSources(null);
+    setAiResponse('');
+    setQuery('');
+    setSearchedQuery('');
+    setFocusMode('general');
+  };
   
-  // --- Render Functions ---
+  const parseResponseWithCitations = (response: string): ReactNode[] => {
+    if (!sources || !sources.searchResults) {
+      return [response];
+    }
+    const parts = response.split(/(\[\d+\])/g);
+    return parts.map((part, index) => {
+      const match = part.match(/\[(\d+)\]/);
+      if (match) {
+        const citationNumber = parseInt(match[1], 10);
+        const source = sources.searchResults[citationNumber - 1];
+        if (source) {
+          return (
+            <a 
+              key={`${index}-${citationNumber}`} 
+              href={source.link} 
+              target="_blank" 
+              rel="noopener noreferrer" 
+              className="citation-link"
+            >
+              [{citationNumber}]
+            </a>
+          );
+        }
+      }
+      return part;
+    });
+  };
+
   const renderSidebar = () => (
     <aside className="sidebar">
       <div className="sidebar-logo">Perplexity</div>
+      <button className="new-search-btn" onClick={handleNewSearch}><PlusIcon/> New Search</button>
       <ul className="nav-list">
         <li className="nav-item active"><HomeIcon /> Home</li>
         <li className="nav-item"><DiscoverIcon /> Discover</li>
@@ -475,76 +545,103 @@ function App() {
     </aside>
   );
 
-  const renderMainContent = () => (
-    <main className="main-content">
-      <div className="container">
-        {!results && !isLoading && !error && (
-            <>
-              {focusMode === 'general' ? (
-                <h1 className="logo-heading">perplexity</h1>
-              ) : (
-                <h1 className="prompt-heading">{focusData[focusMode as Exclude<FocusMode, 'general'>].title}</h1>
-              )}
-              
-              <div className="search-form-container">
-                <form onSubmit={handleSubmit} className="search-input-area">
-                  <input
-                    type="text"
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    className="search-input"
-                    placeholder="Ask anything..."
-                    disabled={isLoading}
-                  />
-                  <button type="submit" className="search-button" disabled={isLoading}>&rarr;</button>
-                </form>
+  const renderSearchPage = () => (
+    <div className="search-page-container">
+      {focusMode === 'general' ? (
+        <h1 className="logo-heading">perplexity</h1>
+      ) : (
+        <h1 className="prompt-heading">{(focusData as any)[focusMode].title}</h1>
+      )}
+      
+      <div className="search-form-container">
+        <form onSubmit={handleSubmit} className="search-input-area">
+          <input 
+            type="text" 
+            value={query} 
+            onChange={(e) => setQuery(e.target.value)} 
+            className="search-input" 
+            placeholder="Ask anything..." 
+            disabled={isLoadingSources || isStreaming} 
+          />
+          <button 
+            type="submit" 
+            className="search-button" 
+            disabled={isLoadingSources || isStreaming}
+          >
+            &rarr;
+          </button>
+        </form>
 
-                {focusMode !== 'general' && (
-                  <ul className="prompt-suggestions-list">
-                    {focusData[focusMode as Exclude<FocusMode, 'general'>].suggestions.map(prompt => (
-                      <li key={prompt} className="prompt-suggestion-item" onClick={() => handleSuggestionClick(prompt)}>
-                        <SearchIcon />
-                        <span>{prompt}</span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-
-              <div className="focus-buttons">
-                <button className={`focus-btn ${focusMode === 'health' ? 'active' : ''}`} onClick={() => handleFocusToggle('health')}>Health</button>
-                <button className={`focus-btn ${focusMode === 'local' ? 'active' : ''}`} onClick={() => handleFocusToggle('local')}>Local</button>
-                <button className={`focus-btn ${focusMode === 'sports' ? 'active' : ''}`} onClick={() => handleFocusToggle('sports')}>Sports</button>
-                <button className={`focus-btn ${focusMode === 'finance' ? 'active' : ''}`} onClick={() => handleFocusToggle('finance')}>Finance</button>
-              </div>
-            </>
+        {focusMode !== 'general' && (
+          <ul className="prompt-suggestions-list">
+            {(focusData as any)[focusMode].suggestions.map((prompt: string) => (
+              <li key={prompt} className="prompt-suggestion-item" onClick={() => handleSuggestionClick(prompt)}>
+                <SearchIcon />
+                <span>{prompt}</span>
+              </li>
+            ))}
+          </ul>
         )}
+      </div>
 
-        {isLoading && <div className="loading">Thinking...</div>}
-        {error && <div className="error">{error}</div>}
+      <div className="focus-buttons">
+        <button className={`focus-btn ${focusMode === 'health' ? 'active' : ''}`} onClick={() => handleFocusToggle('health')}>Health</button>
+        <button className={`focus-btn ${focusMode === 'local' ? 'active' : ''}`} onClick={() => handleFocusToggle('local')}>Local</button>
+        <button className={`focus-btn ${focusMode === 'sports' ? 'active' : ''}`} onClick={() => handleFocusToggle('sports')}>Sports</button>
+        <button className={`focus-btn ${focusMode === 'finance' ? 'active' : ''}`} onClick={() => handleFocusToggle('finance')}>Finance</button>
+      </div>
+    </div>
+  );
 
-        {results && (
-          <div className="results-container">
-            <div className="ai-response-card"><p>{results.aiResponse}</p></div>
-            <div className="search-results-list">
-              <h3>Sources</h3>
-              {results.searchResults.map((item) => (
-                <div key={item.position} className="search-result-item">
-                  <a href={item.link} target="_blank" rel="noopener noreferrer">{item.title}</a>
-                  <p>{item.snippet}</p>
+  const renderResultsPage = () => (
+    <div className="results-page-container">
+      <h1 className="results-query-heading">{searchedQuery}</h1>
+
+      {isLoadingSources && <div className="loading"><span className="spinner">*</span></div>}
+      {error && <div className="error">{error}</div>}
+
+      {sources && (
+        <>
+          {sources.searchResults && sources.searchResults.length > 0 && (
+            <div className="source-links-container">
+              {sources.searchResults.slice(0, 5).map((item, index) => (
+                <div key={item.position} className="source-link-card">
+                   <a href={item.link} target="_blank" rel="noopener noreferrer">
+                    <sup>{index + 1}</sup> {item.source || new URL(item.link).hostname}
+                  </a>
                 </div>
               ))}
             </div>
+          )}
+
+          {sources.videoResults && sources.videoResults.length > 0 && (
+            <div className="video-carousel-container">
+              {sources.videoResults.map((video, index) => (
+                <a key={index} href={video.link} className="video-card" target="_blank" rel="noopener noreferrer">
+                  <img src={video.thumbnail} alt={video.title} className="video-thumbnail" />
+                  <div className="video-play-button"><PlayIcon /></div>
+                </a>
+              ))}
+            </div>
+          )}
+          
+          <div className="ai-response-card">
+            <p>
+              {parseResponseWithCitations(aiResponse)}
+              {isStreaming && <span className="streaming-cursor" />}
+            </p>
           </div>
-        )}
-      </div>
-    </main>
+        </>
+      )}
+    </div>
   );
 
   return (
     <div className="app-layout">
       {renderSidebar()}
-      {renderMainContent()}
+      <main className="main-content">
+        {searchedQuery ? renderResultsPage() : renderSearchPage()}
+      </main>
     </div>
   );
 }
@@ -592,236 +689,201 @@ test('renders learn react link', () => {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
   padding: 2rem;
+  justify-content: flex-start; /* Aligns content to the top for results page */
 }
 
-/* --- Sidebar Styles --- */
-.sidebar-logo {
-  font-size: 1.5rem;
-  font-weight: bold;
-  margin-bottom: 2.5rem;
+/* --- Sidebar --- */
+.sidebar-logo { font-size: 1.5rem; font-weight: bold; margin-bottom: 1rem; }
+.new-search-btn {
+  display: flex; align-items: center; justify-content: center;
+  width: 100%; padding: 0.8rem 1rem; margin-bottom: 1.5rem;
+  border-radius: 8px; cursor: pointer; background-color: var(--accent-color);
+  color: white; border: none; font-size: 1rem; transition: background-color 0.2s;
 }
+.new-search-btn:hover { background-color: var(--accent-hover); }
+.new-search-btn svg { margin-right: 0.5rem; }
+.nav-list { list-style: none; padding: 0; margin: 0; flex-grow: 1; }
+.nav-item { display: flex; align-items: center; padding: 0.8rem 1rem; margin-bottom: 0.5rem; border-radius: 8px; cursor: pointer; color: var(--text-secondary); transition: background-color 0.2s, color 0.2s; }
+.nav-item:hover { background-color: var(--search-bg); color: var(--text-primary); }
+.nav-item.active { background-color: var(--search-bg); color: var(--text-primary); }
+.nav-item svg { margin-right: 1rem; }
 
-.nav-list {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  flex-grow: 1;
-}
-
-.nav-item {
-  display: flex;
-  align-items: center;
-  padding: 0.8rem 1rem;
-  margin-bottom: 0.5rem;
-  border-radius: 8px;
-  cursor: pointer;
-  color: var(--text-secondary);
-  transition: background-color 0.2s, color 0.2s;
-}
-
-.nav-item:hover {
-  background-color: var(--search-bg);
-  color: var(--text-primary);
-}
-
-.nav-item.active {
-  background-color: var(--search-bg);
-  color: var(--text-primary);
-}
-
-.nav-item svg {
-  margin-right: 1rem;
-}
-
-/* --- Main Content & Search --- */
-.container {
+/* --- Search Page Specific --- */
+.search-page-container {
   width: 100%;
   max-width: 800px;
-}
-
-/* Restored logo and new heading styles */
-.logo-heading {
-  font-family: 'Helvetica Neue', sans-serif;
-  font-size: 3.5rem;
-  font-weight: 500;
-  text-align: center;
-  margin-bottom: 2.5rem;
-  color: var(--text-primary);
-}
-
-.prompt-heading {
-  font-size: 2.5rem;
-  font-weight: 500;
-  text-align: center;
-  margin-bottom: 2.5rem;
-  color: var(--text-primary);
-}
-
-
-.search-form-container {
-  background-color: var(--search-bg);
-  border: 1px solid var(--border-color);
-  border-radius: 16px;
-  padding: 1rem 1rem 1.5rem 1.5rem;
-  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
-}
-
-.search-input-area {
   display: flex;
-  align-items: center;
-}
-
-.search-input {
+  flex-direction: column;
+  justify-content: center;
   flex-grow: 1;
-  background-color: transparent;
-  border: none;
-  color: var(--text-primary);
-  font-size: 1.2rem;
-  outline: none;
-  box-sizing: border-box;
-  padding-right: 1rem;
 }
+.logo-heading, .prompt-heading { font-family: 'Helvetica Neue', sans-serif; text-align: center; margin-bottom: 2.5rem; color: var(--text-primary); }
+.logo-heading { font-size: 3.5rem; font-weight: 500; }
+.prompt-heading { font-size: 2.5rem; font-weight: 500; }
+.search-form-container { background-color: var(--search-bg); border: 1px solid var(--border-color); border-radius: 16px; padding: 1rem 1rem 1.5rem 1.5rem; box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2); }
+.search-input-area { display: flex; align-items: center; }
+.search-input { flex-grow: 1; background-color: transparent; border: none; color: var(--text-primary); font-size: 1.2rem; outline: none; box-sizing: border-box; padding-right: 1rem; }
+.search-input::placeholder { color: var(--text-secondary); }
+.search-button { background: var(--accent-color); border: none; border-radius: 8px; width: 3rem; height: 2.5rem; color: white; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 1.5rem; transition: background-color 0.2s; flex-shrink: 0; }
+.search-button:hover { background-color: var(--accent-hover); }
+.search-button:disabled { background-color: #555; cursor: not-allowed; }
+.focus-buttons { display: flex; justify-content: center; gap: 0.8rem; margin-top: 2rem; flex-wrap: wrap; }
+.focus-btn { background-color: transparent; border: 1px solid var(--border-color); color: var(--text-secondary); padding: 0.5rem 1rem; border-radius: 1rem; cursor: pointer; font-size: 0.9rem; transition: border-color 0.2s, color 0.2s, background-color 0.2s; }
+.focus-btn:hover { border-color: var(--text-primary); color: var(--text-primary); }
+.focus-btn.active { background-color: var(--search-bg); border-color: var(--accent-color); color: var(--accent-color); }
+.prompt-suggestions-list { list-style: none; padding: 0; margin: 1.5rem 0 0 0; border-top: 1px solid var(--border-color); }
+.prompt-suggestion-item { display: flex; align-items: center; color: var(--text-secondary); padding: 0.8rem 0; cursor: pointer; transition: color 0.2s; }
+.prompt-suggestion-item:hover { color: var(--text-primary); }
+.prompt-suggestion-item svg { margin-right: 1rem; width: 18px; height: 18px; }
 
-.search-input::placeholder {
-  color: var(--text-secondary);
-}
-
-.search-button {
-  background: var(--accent-color);
-  border: none;
-  border-radius: 8px;
-  width: 3rem;
-  height: 2.5rem;
-  color: white;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 1.5rem;
-  transition: background-color 0.2s;
-  flex-shrink: 0;
-}
-
-.search-button:hover {
-  background-color: var(--accent-hover);
-}
-
-.search-button:disabled {
-  background-color: #555;
-  cursor: not-allowed;
-}
-
-/* --- Focus Buttons (Health, Local, etc.) --- */
-.focus-buttons {
-  display: flex;
-  justify-content: center;
-  gap: 0.8rem;
-  margin-top: 2rem;
-  flex-wrap: wrap;
-}
-
-.focus-btn {
-  background-color: transparent;
-  border: 1px solid var(--border-color);
-  color: var(--text-secondary);
-  padding: 0.5rem 1rem;
-  border-radius: 1rem;
-  cursor: pointer;
-  font-size: 0.9rem;
-  transition: border-color 0.2s, color 0.2s, background-color 0.2s;
-}
-
-.focus-btn:hover {
-  border-color: var(--text-primary);
-  color: var(--text-primary);
-}
-
-.focus-btn.active {
-  background-color: var(--search-bg);
-  border-color: var(--accent-color);
-  color: var(--accent-color);
-}
-
-/* --- Suggestion Prompts --- */
-.prompt-suggestions-list {
-  list-style: none;
-  padding: 0;
-  margin: 1.5rem 0 0 0;
-  border-top: 1px solid var(--border-color);
-}
-
-.prompt-suggestion-item {
-  display: flex;
-  align-items: center;
-  color: var(--text-secondary);
-  padding: 0.8rem 0;
-  cursor: pointer;
-  transition: color 0.2s;
-}
-
-.prompt-suggestion-item:hover {
-  color: var(--text-primary);
-}
-
-.prompt-suggestion-item svg {
-  margin-right: 1rem;
-  width: 18px;
-  height: 18px;
-}
-
-
-/* --- Results --- */
-.results-container {
+/* --- Results Page Specific --- */
+.results-page-container {
   width: 100%;
-  margin-top: 3rem;
+  max-width: 900px;
 }
-
-.ai-response-card {
-  background-color: var(--search-bg);
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  padding: 1.5rem;
-  margin-bottom: 2rem;
-  white-space: pre-wrap;
-  line-height: 1.6;
-}
-
-.search-results-list h3 {
-  margin-bottom: 1rem;
+.results-query-heading {
+  font-size: 2.2rem;
   font-weight: 500;
-  color: var(--text-secondary);
+  margin-bottom: 2rem;
 }
-
-.search-result-item {
-  border-top: 1px solid var(--border-color);
-  padding: 1.5rem 0;
+.source-links-container {
+  display: flex;
+  gap: 0.8rem;
+  margin-bottom: 2rem;
+  padding-bottom: 1rem;
+  overflow-x: auto;
 }
-
-.search-result-item:first-child {
-  border-top: none;
+.source-link-card {
+  background-color: var(--search-bg);
+  padding: 0.8rem 1rem;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  white-space: nowrap;
+  font-size: 0.9rem;
 }
-
-.search-result-item a {
-  text-decoration: none;
-  color: var(--accent-color);
+.source-link-card a { color: var(--text-secondary); text-decoration: none; }
+.source-link-card a:hover { color: var(--text-primary); }
+.video-carousel-container {
+  display: flex;
+  gap: 1rem;
+  overflow-x: auto;
+  padding-bottom: 1rem;
+  margin-bottom: 2rem;
+}
+.video-card {
+  flex: 0 0 250px;
+  border-radius: 12px;
+  overflow: hidden;
+  position: relative;
+  cursor: pointer;
+  background-color: var(--search-bg);
+}
+.video-thumbnail {
+  width: 100%;
+  height: 150px;
+  object-fit: cover;
+  display: block;
+}
+.video-play-button {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 50px;
+  height: 50px;
+  background-color: rgba(0, 0, 0, 0.6);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  transition: transform 0.2s;
+}
+.video-card:hover .video-play-button {
+  transform: translate(-50%, -50%) scale(1.1);
+}
+.ai-response-card {
+  background-color: transparent;
+  border: none;
+  padding: 0;
+  white-space: pre-wrap;
+  line-height: 1.7;
   font-size: 1.1rem;
 }
-.search-result-item a:hover {
-  text-decoration: underline;
-}
-
-.search-result-item p {
-  margin: 0.5rem 0 0;
-  color: var(--text-secondary);
-}
-
 .loading, .error {
   text-align: center;
   font-size: 1.2rem;
   margin-top: 2rem;
   color: var(--text-secondary);
+}
+
+.streaming-cursor {
+  display: inline-block;
+  width: 10px;
+  height: 1.1rem;
+  background-color: var(--text-primary);
+  margin-left: 4px;
+  animation: blink 1s step-end infinite;
+}
+
+@keyframes blink {
+  from, to {
+    background-color: transparent;
+  }
+  50% {
+    background-color: var(--text-primary);
+  }
+}
+
+.spinner {
+  display: inline-block;
+  font-size: 1.5rem;
+  font-weight: bold;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.streaming-cursor {
+  display: inline-block;
+  width: 10px;
+  height: 1.1rem;
+  background-color: var(--text-primary);
+  margin-left: 4px;
+  animation: blink 1s step-end infinite;
+}
+
+@keyframes blink {
+  from, to { background-color: transparent; }
+  50% { background-color: var(--text-primary); }
+}
+
+.citation-link {
+  color: var(--accent-color);
+  text-decoration: none;
+  font-weight: bold;
+  vertical-align: super;
+  font-size: 0.8em;
+  padding: 0 2px;
+}
+
+.citation-link:hover {
+  text-decoration: underline;
+  color: var(--accent-hover);
+}
+
+.source-link-card sup {
+  margin-right: 4px;
+  font-weight: bold;
+  color: var(--text-primary);
 }
 ```
 
@@ -911,6 +973,14 @@ export const SignInIcon = ({ className, ...props }: IconProps) => (
 
 export const SearchIcon = ({ className, ...props }: IconProps) => (
   <svg className={className} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+);
+
+export const PlusIcon = ({ className, ...props }: IconProps) => (
+  <svg className={className} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+);
+
+export const PlayIcon = ({ className, ...props }: IconProps) => (
+  <svg className={className} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" {...props}><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
 );
 ```
 

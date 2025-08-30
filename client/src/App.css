@@ -196,3 +196,55 @@
   from, to { background-color: transparent; }
   50% { background-color: var(--text-primary); }
 }
+
+.citation-link {
+  color: var(--accent-color);
+  text-decoration: none;
+  font-weight: bold;
+  vertical-align: super;
+  font-size: 0.8em;
+  padding: 0 2px;
+}
+
+.citation-link:hover {
+  text-decoration: underline;
+  color: var(--accent-hover);
+}
+
+.source-link-card sup {
+  margin-right: 4px;
+  font-weight: bold;
+  color: var(--text-primary);
+}
+.conversation-turn {
+  margin-bottom: 2rem;
+}
+
+.conversation-query {
+  font-size: 1.5rem;
+  font-weight: 500;
+  margin-bottom: 1.5rem;
+}
+
+.follow-up-form-container {
+  margin-top: 2rem;
+  background-color: var(--search-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 16px;
+  padding: 1rem 1rem 1.5rem 1.5rem;
+}
+
+.follow-up-input-area {
+  display: flex;
+  align-items: center;
+}
+
+.follow-up-input {
+  flex-grow: 1;
+  background-color: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-size: 1.1rem;
+  outline: none;
+  padding-right: 1rem;
+}

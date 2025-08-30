@@ -1,38 +1,253 @@
-.App {
-  text-align: center;
-}
-
-.App-logo {
-  height: 40vmin;
-  pointer-events: none;
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .App-logo {
-    animation: App-logo-spin infinite 20s linear;
-  }
-}
-
-.App-header {
-  background-color: #282c34;
+/* --- Main Layout --- */
+.app-layout {
+  display: flex;
   min-height: 100vh;
+}
+
+.sidebar {
+  width: 240px;
+  background-color: var(--sidebar-bg);
+  border-right: 1px solid var(--border-color);
+  padding: 1.5rem 1rem;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+.main-content {
+  flex-grow: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  font-size: calc(10px + 2vmin);
+  padding: 2rem;
+}
+
+/* --- Sidebar Styles --- */
+.sidebar-logo {
+  font-size: 1.5rem;
+  font-weight: bold;
+  margin-bottom: 2.5rem;
+}
+
+.nav-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  flex-grow: 1;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  padding: 0.8rem 1rem;
+  margin-bottom: 0.5rem;
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  transition: background-color 0.2s, color 0.2s;
+}
+
+.nav-item:hover {
+  background-color: var(--search-bg);
+  color: var(--text-primary);
+}
+
+.nav-item.active {
+  background-color: var(--search-bg);
+  color: var(--text-primary);
+}
+
+.nav-item svg {
+  margin-right: 1rem;
+}
+
+/* --- Main Content & Search --- */
+.container {
+  width: 100%;
+  max-width: 800px;
+}
+
+/* Restored logo and new heading styles */
+.logo-heading {
+  font-family: 'Helvetica Neue', sans-serif;
+  font-size: 3.5rem;
+  font-weight: 500;
+  text-align: center;
+  margin-bottom: 2.5rem;
+  color: var(--text-primary);
+}
+
+.prompt-heading {
+  font-size: 2.5rem;
+  font-weight: 500;
+  text-align: center;
+  margin-bottom: 2.5rem;
+  color: var(--text-primary);
+}
+
+
+.search-form-container {
+  background-color: var(--search-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 16px;
+  padding: 1rem 1rem 1.5rem 1.5rem;
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+}
+
+.search-input-area {
+  display: flex;
+  align-items: center;
+}
+
+.search-input {
+  flex-grow: 1;
+  background-color: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-size: 1.2rem;
+  outline: none;
+  box-sizing: border-box;
+  padding-right: 1rem;
+}
+
+.search-input::placeholder {
+  color: var(--text-secondary);
+}
+
+.search-button {
+  background: var(--accent-color);
+  border: none;
+  border-radius: 8px;
+  width: 3rem;
+  height: 2.5rem;
   color: white;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.5rem;
+  transition: background-color 0.2s;
+  flex-shrink: 0;
 }
 
-.App-link {
-  color: #61dafb;
+.search-button:hover {
+  background-color: var(--accent-hover);
 }
 
-@keyframes App-logo-spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
+.search-button:disabled {
+  background-color: #555;
+  cursor: not-allowed;
+}
+
+/* --- Focus Buttons (Health, Local, etc.) --- */
+.focus-buttons {
+  display: flex;
+  justify-content: center;
+  gap: 0.8rem;
+  margin-top: 2rem;
+  flex-wrap: wrap;
+}
+
+.focus-btn {
+  background-color: transparent;
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  padding: 0.5rem 1rem;
+  border-radius: 1rem;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: border-color 0.2s, color 0.2s, background-color 0.2s;
+}
+
+.focus-btn:hover {
+  border-color: var(--text-primary);
+  color: var(--text-primary);
+}
+
+.focus-btn.active {
+  background-color: var(--search-bg);
+  border-color: var(--accent-color);
+  color: var(--accent-color);
+}
+
+/* --- Suggestion Prompts --- */
+.prompt-suggestions-list {
+  list-style: none;
+  padding: 0;
+  margin: 1.5rem 0 0 0;
+  border-top: 1px solid var(--border-color);
+}
+
+.prompt-suggestion-item {
+  display: flex;
+  align-items: center;
+  color: var(--text-secondary);
+  padding: 0.8rem 0;
+  cursor: pointer;
+  transition: color 0.2s;
+}
+
+.prompt-suggestion-item:hover {
+  color: var(--text-primary);
+}
+
+.prompt-suggestion-item svg {
+  margin-right: 1rem;
+  width: 18px;
+  height: 18px;
+}
+
+
+/* --- Results --- */
+.results-container {
+  width: 100%;
+  margin-top: 3rem;
+}
+
+.ai-response-card {
+  background-color: var(--search-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 1.5rem;
+  margin-bottom: 2rem;
+  white-space: pre-wrap;
+  line-height: 1.6;
+}
+
+.search-results-list h3 {
+  margin-bottom: 1rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.search-result-item {
+  border-top: 1px solid var(--border-color);
+  padding: 1.5rem 0;
+}
+
+.search-result-item:first-child {
+  border-top: none;
+}
+
+.search-result-item a {
+  text-decoration: none;
+  color: var(--accent-color);
+  font-size: 1.1rem;
+}
+.search-result-item a:hover {
+  text-decoration: underline;
+}
+
+.search-result-item p {
+  margin: 0.5rem 0 0;
+  color: var(--text-secondary);
+}
+
+.loading, .error {
+  text-align: center;
+  font-size: 1.2rem;
+  margin-top: 2rem;
+  color: var(--text-secondary);
 }

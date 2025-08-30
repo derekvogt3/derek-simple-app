@@ -1,37 +1,86 @@
-# Add 'request' to your flask import
-from flask import Flask, request 
-from flask_sqlalchemy import SQLAlchemy
-from flask_cors import CORS 
+import os
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from serpapi import GoogleSearch
+from openai import OpenAI
+from dotenv import load_dotenv
 
+# Load environment variables from .env file
+load_dotenv()
+
+# Initialize the Flask app
 app = Flask(__name__)
-
 CORS(app)
 
+# Initialize API clients
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+serpapi_api_key = os.getenv("SERPAPI_API_KEY")
 
-# Database Configuration
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///app.db'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-db = SQLAlchemy(app)
+# --- API Endpoint to handle queries ---
+@app.route('/api/query', methods=['POST'])
+def handle_query():
+    # Get the user's query from the request body
+    data = request.get_json()
+    query = data.get('query')
 
-# A simple model for demonstration
-class User(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(80), unique=True, nullable=False)
+    if not query:
+        return jsonify({"error": "Query is required"}), 400
+    if not serpapi_api_key or not client.api_key:
+        return jsonify({"error": "API keys are not configured correctly"}), 500
 
-    def __repr__(self):
-        return f'<User {self.username}>'
+    try:
+        # --- 1. Fetch search results using SerpAPI ---
+        print(f"Fetching search results for: {query}")
+        search = GoogleSearch({
+            "q": query,
+            "api_key": serpapi_api_key
+        })
+        search_results = search.get_dict()
+        organic_results = search_results.get("organic_results", [])
 
-# A simple route to test the API
-@app.route('/api/hello')
-def hello_world():
-    # --- ADD THIS LOGGING ---
-    print("--- INCOMING REQUEST ---")
-    print(f"Request Origin: {request.headers.get('Origin')}")
-    print(f"Request Headers: {request.headers}")
-    print("------------------------")
-    return {'message': 'Hello from the Flask backend!'}
+        # Extract relevant context for the AI
+        context = ""
+        for i, result in enumerate(organic_results[:5]): # Use top 5 results
+            context += f"[{i+1}] {result.get('snippet', 'No snippet available.')}\n"
+        
+        print(f"Context for AI:\n{context}")
 
+        # --- 2. Generate AI response using OpenAI ---
+        print("Generating AI response...")
+        prompt = f"""
+        Based on the following search results, provide a comprehensive answer to the user's query: "{query}"
+
+        Search Results (with sources):
+        {context}
+
+        Instructions:
+        - Synthesize the information from the search results into a clear, well-written answer.
+        - Your answer MUST include citations in the format [1], [2], etc., corresponding to the search results provided.
+        - If the search results do not provide enough information, state that you couldn't find a definitive answer.
+        - Do not invent information. Base your answer strictly on the provided text.
+        """
+
+        completion = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a helpful AI assistant that answers questions based on provided search results."},
+                {"role": "user", "content": prompt}
+            ]
+        )
+        ai_response = completion.choices[0].message.content
+        print(f"AI Response: {ai_response}")
+
+        # --- 3. Combine and return the results ---
+        response_data = {
+            "aiResponse": ai_response,
+            "searchResults": organic_results
+        }
+        return jsonify(response_data)
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return jsonify({"error": str(e)}), 500
+
+# Run the app on port 5001 as we established
 if __name__ == '__main__':
-    with app.app_context():
-        db.create_all()
     app.run(debug=True, port=5001)
